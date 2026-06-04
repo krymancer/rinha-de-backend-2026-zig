@@ -1,7 +1,7 @@
 services:
   api1:
-    image: ghcr.io/krymancer/rinha-de-backend-2026-zig:794b9d892faf50bb6e668a1c3d9b9aef26af23bf
-    command: ["/api", "/sockets/api1.sock", "/index.bin"]
+    image: ghcr.io/krymancer/rinha-de-backend-2026-zig:98c678aee9c0d9cf186259db2bc58b34cc84c547
+    command: ["/api", "/sockets/api1.sock", "/index.bin", "30", "80"]
     network_mode: none
     volumes:
       - sockets:/sockets
@@ -14,8 +14,8 @@ services:
           memory: "160MB"
 
   api2:
-    image: ghcr.io/krymancer/rinha-de-backend-2026-zig:794b9d892faf50bb6e668a1c3d9b9aef26af23bf
-    command: ["/api", "/sockets/api2.sock", "/index.bin"]
+    image: ghcr.io/krymancer/rinha-de-backend-2026-zig:98c678aee9c0d9cf186259db2bc58b34cc84c547
+    command: ["/api", "/sockets/api2.sock", "/index.bin", "30", "80"]
     network_mode: none
     volumes:
       - sockets:/sockets
@@ -28,7 +28,7 @@ services:
           memory: "160MB"
 
   lb:
-    image: ghcr.io/krymancer/rinha-de-backend-2026-zig:794b9d892faf50bb6e668a1c3d9b9aef26af23bf
+    image: ghcr.io/krymancer/rinha-de-backend-2026-zig:98c678aee9c0d9cf186259db2bc58b34cc84c547
     command: ["/lb", "9999", "/sockets/api1.sock", "/sockets/api2.sock"]
     depends_on:
       - api1
