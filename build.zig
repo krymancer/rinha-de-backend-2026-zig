@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "lb", .src = "src/lb.zig" },
         .{ .name = "api", .src = "src/api.zig" },
         .{ .name = "indexer", .src = "src/indexer.zig" },
+        .{ .name = "measure", .src = "src/measure.zig" },
     };
 
     for (exes) |e| {
