@@ -189,6 +189,8 @@ fn onCtrlReadable(ctrl: i32) void {
                     continue;
                 }
                 conns[@intCast(cfd)] = .{ .kind = .client, .len = 0 };
+                const bp: c_int = 64; // SO_BUSY_POLL microseconds (best-effort)
+                _ = linux.setsockopt(cfd, SOL.SOCKET, linux.SO.BUSY_POLL, std.mem.asBytes(&bp), @sizeOf(c_int));
                 epollAdd(cfd, EPOLL.IN | EPOLL.RDHUP);
             },
             .again => return,
@@ -217,6 +219,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (posix.errno(linux.listen(lfd, 16)) != .SUCCESS) return error.Listen;
 
     epfd = @intCast(try os.ok(linux.epoll_create1(0)));
+    // NAPI busy-poll on the epoll instance (kernel >= 6.9): epoll_wait polls the
+    // device for up to busy_poll_usecs before sleeping, slashing wakeup latency
+    // under CPU contention. Best-effort — ignored on older kernels. This is the
+    // technique the #1 (asm) submission uses to reach sub-ms p99.
+    const EpollParams = extern struct { busy_poll_usecs: u32, busy_poll_budget: u16, prefer_busy_poll: u8, pad: u8 };
+    const EPIOCSPARAMS: u32 = 0x40086502; // _IOW('e', 0x02, sizeof(epoll_params)=8)
+    var ep_params = EpollParams{ .busy_poll_usecs = 64, .busy_poll_budget = 8, .prefer_busy_poll = 1, .pad = 0 };
+    _ = linux.ioctl(epfd, EPIOCSPARAMS, @intFromPtr(&ep_params));
+
     conns[@intCast(lfd)] = .{ .kind = .listen, .len = 0 };
     epollAdd(lfd, EPOLL.IN);
 
