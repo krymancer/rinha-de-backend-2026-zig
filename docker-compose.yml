@@ -3,7 +3,6 @@ services:
     image: ghcr.io/krymancer/rinha-de-backend-2026-zig:3f05ad3b034f610267e6535bdde774db5bbc9637
     command: ["/api", "/sockets/api1.sock", "/index.bin"]
     network_mode: none
-    cpuset: "0"
     volumes:
       - sockets:/sockets
     ulimits:
@@ -11,14 +10,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.475"
+          cpus: "0.45"
           memory: "160MB"
 
   api2:
     image: ghcr.io/krymancer/rinha-de-backend-2026-zig:3f05ad3b034f610267e6535bdde774db5bbc9637
     command: ["/api", "/sockets/api2.sock", "/index.bin"]
     network_mode: none
-    cpuset: "1"
     volumes:
       - sockets:/sockets
     ulimits:
@@ -26,7 +24,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.475"
+          cpus: "0.45"
           memory: "160MB"
 
   lb:
@@ -37,13 +35,12 @@ services:
       - api2
     ports:
       - "9999:9999"
-    cpuset: "2,3"
     volumes:
       - sockets:/sockets
     deploy:
       resources:
         limits:
-          cpus: "0.05"
+          cpus: "0.10"
           memory: "30MB"
 
 volumes:
