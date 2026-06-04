@@ -301,6 +301,96 @@ const Top5 = struct {
     }
 };
 
+// ---- best-bin-first (BBF) priority search -----------------------------------
+// Visits leaves in ascending region-lower-bound order via a binary min-heap.
+// In-distribution queries hit the exact prune (bound >= 5th-best) early -> exact,
+// fast. Out-of-distribution queries (sparse regions, huge NN radius) instead hit
+// the visit budget -> bounded latency, but because the BEST leaves are visited
+// first the 5-NN are almost always already found -> recall stays ~100%.
+
+/// 16-byte heap entry. The per-dimension offset state lives in a separate arena
+/// (off_idx points into it), so heap sift-up/down only moves 16 bytes per swap
+/// instead of ~80 — the difference between heap-bound and scan-bound latency.
+pub const HeapEnt = struct {
+    bound: i64,
+    node: u32,
+    off_idx: u32,
+};
+
+pub const Off = [VPAD]i32;
+
+inline fn heapPush(h: []HeapEnt, n: *usize, e: HeapEnt) void {
+    if (n.* >= h.len) return; // heap full: drop (rare; minor recall cost)
+    var i = n.*;
+    h[i] = e;
+    n.* += 1;
+    while (i > 0) {
+        const p = (i - 1) / 2;
+        if (h[p].bound <= h[i].bound) break;
+        const t = h[p];
+        h[p] = h[i];
+        h[i] = t;
+        i = p;
+    }
+}
+
+inline fn heapPopMin(h: []HeapEnt, n: *usize) HeapEnt {
+    const top = h[0];
+    n.* -= 1;
+    h[0] = h[n.*];
+    var i: usize = 0;
+    while (true) {
+        const l = 2 * i + 1;
+        const r = 2 * i + 2;
+        var m = i;
+        if (l < n.* and h[l].bound < h[m].bound) m = l;
+        if (r < n.* and h[r].bound < h[m].bound) m = r;
+        if (m == i) break;
+        const t = h[m];
+        h[m] = h[i];
+        h[i] = t;
+        i = m;
+    }
+    return top;
+}
+
+pub fn searchBBF(idx: *const Index, q: *const [VPAD]i16, budget: usize, heap: []HeapEnt, offs: []Off, leaves: ?*usize) Result {
+    var top = Top5{};
+    var hn: usize = 0;
+    var on: usize = 1; // offs arena cursor; offs[0] is the root's all-zero offset
+    offs[0] = .{0} ** VPAD;
+    heapPush(heap, &hn, .{ .bound = 0, .node = idx.root, .off_idx = 0 });
+    var visited: usize = 0;
+    while (hn > 0 and visited < budget) {
+        const e = heapPopMin(heap, &hn);
+        if (e.bound >= top.worstDist()) break; // exact: nothing remaining can beat the 5th-best
+        const eoff = offs[e.off_idx];
+        var node = e.node;
+        while (idx.nodes[node].dim != LEAF) {
+            const nd = idx.nodes[node];
+            const d = nd.dim;
+            const delta: i64 = @as(i64, q[d]) - @as(i64, nd.split);
+            const dd: i64 = delta * delta;
+            const near = if (delta <= 0) nd.a else nd.b;
+            const far = if (delta <= 0) nd.b else nd.a;
+            const new_rd = e.bound - @as(i64, eoff[d]) + dd;
+            if (new_rd < top.worstDist() and on < offs.len and hn < heap.len) {
+                offs[on] = eoff;
+                offs[on][d] = @intCast(dd);
+                heapPush(heap, &hn, .{ .bound = new_rd, .node = far, .off_idx = @intCast(on) });
+                on += 1;
+            }
+            node = near;
+        }
+        scanLeaf(idx, idx.nodes[node], q, &top);
+        visited += 1;
+    }
+    if (leaves) |p| p.* = visited;
+    var fraud: u8 = 0;
+    inline for (0..K) |j| fraud += @intCast(top.keys[j] & 1);
+    return .{ .fraud_count = fraud, .approved = fraud < 3 };
+}
+
 inline fn blockDist(block: [*]const i16, q: *const [VPAD]i16) @Vector(LANES, i32) {
     var acc: @Vector(LANES, i32) = @splat(0);
     inline for (0..VPAD) |d| {

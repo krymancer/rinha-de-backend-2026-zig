@@ -41,8 +41,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const val_path = it.next() orelse return;
     const leaf_max: usize = if (it.next()) |l| (std.fmt.parseInt(usize, l, 10) catch 1024) else 1024;
     const cap: usize = if (it.next()) |l| (std.fmt.parseInt(usize, l, 10) catch 1_000_000) else 1_000_000;
+    const budget: usize = if (it.next()) |l| (std.fmt.parseInt(usize, l, 10) catch 0) else 0; // >0 => BBF mode
 
     const a = std.heap.page_allocator;
+    const heap = try a.alloc(index.HeapEnt, 120_000);
+    defer a.free(heap);
+    const offs = try a.alloc(index.Off, 120_000);
+    defer a.free(offs);
 
     var t = osm.nowNs();
     var R = try refs_mod.loadJson(a, refs_path);
@@ -94,7 +99,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             continue;
         };
         var nprobe: usize = 0;
-        const res = index.searchCore(&idx, &qv, &nprobe, cap);
+        const res = if (budget > 0)
+            index.searchBBF(&idx, &qv, budget, heap, offs, &nprobe)
+        else
+            index.searchCore(&idx, &qv, &nprobe, cap);
         const dt = osm.nowNs() - t0;
         try lat.append(a, dt);
         try probes_all.append(a, nprobe);

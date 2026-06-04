@@ -27,8 +27,16 @@ const Conn = struct {
     buf: [BUF]u8 = undefined,
 };
 
+// Best-bin-first visit budget. In-distribution queries finish exactly (the
+// lower-bound prune triggers) well before this; the budget only bounds latency
+// for out-of-distribution queries (e.g. the randomized-date test payloads).
+const SEARCH_BUDGET: usize = 2048;
+const HEAP_CAP: usize = SEARCH_BUDGET * 24;
+
 var conns: [MAX_FDS]Conn = undefined;
 var gidx: index.Index = undefined;
+var gheap: [HEAP_CAP]index.HeapEnt = undefined;
+var goffs: [HEAP_CAP]index.Off = undefined;
 var epfd: i32 = undefined;
 
 inline fn epollAdd(fd: i32, events: u32) void {
@@ -125,7 +133,7 @@ fn process(fd: i32) bool {
             if (data.len < total) break; // body incomplete
             const body = data[hend_rel..total];
             resp = if (vec.vectorize(body)) |q|
-                http.RESP[index.search(&gidx, &q).fraud_count]
+                http.RESP[index.searchBBF(&gidx, &q, SEARCH_BUDGET, &gheap, &goffs, null).fraud_count]
             else
                 http.SAFE;
         }
