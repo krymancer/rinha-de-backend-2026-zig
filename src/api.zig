@@ -39,6 +39,40 @@ var gidx: ivf.Ivf = undefined;
 var gkeys: [MAX_CLUSTERS]u64 = undefined;
 var epfd: i32 = undefined;
 
+// epoll_wait with microsecond-precision timeout via epoll_pwait2 (kernel >= 5.11),
+// falling back to millisecond epoll_wait on older kernels. timeout_us < 0 blocks.
+inline fn epollWaitUs(events: []linux.epoll_event, timeout_us: i64) usize {
+    if (timeout_us < 0) return linux.epoll_wait(epfd, events.ptr, @intCast(events.len), -1);
+    if (timeout_us == 0) return linux.epoll_wait(epfd, events.ptr, @intCast(events.len), 0);
+    var ts = linux.timespec{
+        .sec = @intCast(@divTrunc(timeout_us, 1_000_000)),
+        .nsec = @intCast(@mod(timeout_us, 1_000_000) * 1000),
+    };
+    const rc = linux.syscall6(.epoll_pwait2, @as(usize, @bitCast(@as(isize, epfd))), @intFromPtr(events.ptr), events.len, @intFromPtr(&ts), 0, 8);
+    if (posix.errno(rc) == .NOSYS) {
+        const ms: i32 = @intCast(@divTrunc(timeout_us + 999, 1000));
+        return linux.epoll_wait(epfd, events.ptr, @intCast(events.len), ms);
+    }
+    return rc;
+}
+
+// Adaptive wait: poll, then busy-spin (PAUSE) for spin_ns catching back-to-back
+// requests with no sleep, then block with a short finite timeout (idle_us) instead
+// of forever — the periodic wakeup keeps the core warm (no deep C-state / freq
+// drop), cutting the cold-wakeup latency that dominated the tail. (bmtec's loop.)
+inline fn waitEvents(events: []linux.epoll_event, spin_ns: u64, idle_us: i64) usize {
+    if (spin_ns == 0) return epollWaitUs(events, idle_us);
+    var rc = epollWaitUs(events, 0);
+    if (posix.errno(rc) == .SUCCESS and rc != 0) return rc;
+    const start = os.nowNs();
+    while (os.nowNs() - start < spin_ns) {
+        rc = epollWaitUs(events, 0);
+        if (posix.errno(rc) == .SUCCESS and rc != 0) return rc;
+        std.atomic.spinLoopHint();
+    }
+    return epollWaitUs(events, idle_us);
+}
+
 inline fn epollAdd(fd: i32, events: u32) void {
     var ev = linux.epoll_event{ .events = events, .data = .{ .fd = fd } };
     _ = linux.epoll_ctl(epfd, EPOLL.CTL_ADD, fd, &ev);
@@ -204,6 +238,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     _ = it.next();
     const ctrl_path = it.next() orelse return error.Args;
     const index_path = it.next() orelse return error.Args;
+    // Optional epoll tuning: <spin_us> <idle_us>. Defaults (0, -1) = block forever
+    // (original behavior). e.g. "30 80" = 30us spin then 80us finite-timeout block.
+    const spin_us: u64 = if (it.next()) |s| (std.fmt.parseInt(u64, s, 10) catch 0) else 0;
+    const idle_us: i64 = if (it.next()) |s| (std.fmt.parseInt(i64, s, 10) catch -1) else -1;
+    const spin_ns: u64 = spin_us * 1000;
 
     gidx = try ivf.map(std.heap.page_allocator, index_path, true);
 
@@ -233,12 +272,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var events: [256]linux.epoll_event = undefined;
     while (true) {
-        const nrc = linux.epoll_wait(epfd, &events, events.len, -1);
+        const nrc = waitEvents(events[0..], spin_ns, idle_us);
         const n = switch (posix.errno(nrc)) {
             .SUCCESS => nrc,
             .INTR => continue,
             else => continue,
         };
+        if (n == 0) continue; // finite idle timeout fired with no events; re-poll/spin
         for (events[0..n]) |e| {
             const fd = e.data.fd;
             if (fd < 0 or fd >= MAX_FDS) continue;
