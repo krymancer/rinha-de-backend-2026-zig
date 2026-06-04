@@ -9,7 +9,7 @@ const posix = std.posix;
 const os = @import("os.zig");
 const http = @import("http.zig");
 const vec = @import("vectorize.zig");
-const index = @import("index.zig");
+const ivf = @import("ivf.zig");
 
 const EPOLL = linux.EPOLL;
 const AF = linux.AF;
@@ -27,16 +27,16 @@ const Conn = struct {
     buf: [BUF]u8 = undefined,
 };
 
-// Best-bin-first visit budget. In-distribution queries finish exactly (the
-// lower-bound prune triggers) well before this; the budget only bounds latency
-// for out-of-distribution queries (e.g. the randomized-date test payloads).
-const SEARCH_BUDGET: usize = 2048;
-const HEAP_CAP: usize = SEARCH_BUDGET * 24;
+// IVF probe budget: probe INIT_PROBE clusters, then stop as soon as the decision
+// is confident (0 or 5 frauds) or exact; expand up to MAX_PROBE only for the
+// ambiguous out-of-distribution queries — keeping the common case sub-0.1ms.
+const INIT_PROBE: usize = 24;
+const MAX_PROBE: usize = 96;
+const MAX_CLUSTERS: usize = 8192; // upper bound for the per-query LB-key scratch
 
 var conns: [MAX_FDS]Conn = undefined;
-var gidx: index.Index = undefined;
-var gheap: [HEAP_CAP]index.HeapEnt = undefined;
-var goffs: [HEAP_CAP]index.Off = undefined;
+var gidx: ivf.Ivf = undefined;
+var gkeys: [MAX_CLUSTERS]u64 = undefined;
 var epfd: i32 = undefined;
 
 inline fn epollAdd(fd: i32, events: u32) void {
@@ -133,7 +133,7 @@ fn process(fd: i32) bool {
             if (data.len < total) break; // body incomplete
             const body = data[hend_rel..total];
             resp = if (vec.vectorize(body)) |q|
-                http.RESP[index.searchBBF(&gidx, &q, SEARCH_BUDGET, &gheap, &goffs, null).fraud_count]
+                http.RESP[ivf.search(&gidx, &q, INIT_PROBE, MAX_PROBE, gkeys[0..gidx.n_clusters], null).fraud_count]
             else
                 http.SAFE;
         }
@@ -203,7 +203,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const ctrl_path = it.next() orelse return error.Args;
     const index_path = it.next() orelse return error.Args;
 
-    gidx = try index.mapIndex(std.heap.page_allocator, index_path, true);
+    gidx = try ivf.map(std.heap.page_allocator, index_path, true);
 
     // Unix SEQPACKET listener for the LB to connect and pass client fds.
     const lfd: i32 = @intCast(try os.ok(linux.socket(AF.UNIX, SOCK.SEQPACKET | SOCK.NONBLOCK | SOCK.CLOEXEC, 0)));

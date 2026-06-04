@@ -1,20 +1,21 @@
-//! Build-time: references.json -> index.bin (mmap-ready kd-tree).
-//!   indexer <references.json> <out.index.bin> [leaf_max]
+//! Build-time: references.json -> index.bin (IVF k-means index, mmap-ready).
+//!   indexer <references.json> <out.index.bin> [n_clusters] [iters]
 
 const std = @import("std");
 const refs_mod = @import("refs.zig");
-const index = @import("index.zig");
+const ivf = @import("ivf.zig");
 const osm = @import("os.zig");
 
 pub fn main(init: std.process.Init.Minimal) !void {
     var it = std.process.Args.Iterator.init(init.args);
     _ = it.next();
     const refs_path = it.next() orelse {
-        std.debug.print("usage: indexer <references.json> <out.bin> [leaf_max]\n", .{});
+        std.debug.print("usage: indexer <references.json> <out.bin> [n_clusters] [iters]\n", .{});
         return error.Args;
     };
     const out_path = it.next() orelse return error.Args;
-    const leaf_max: usize = if (it.next()) |l| (std.fmt.parseInt(usize, l, 10) catch 64) else 64;
+    const n_clusters: usize = if (it.next()) |l| (std.fmt.parseInt(usize, l, 10) catch 2048) else 2048;
+    const iters: usize = if (it.next()) |l| (std.fmt.parseInt(usize, l, 10) catch 12) else 12;
 
     const a = std.heap.page_allocator;
     var t = osm.nowNs();
@@ -23,10 +24,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.debug.print("[indexer] {d} refs in {d} ms\n", .{ R.n, (osm.nowNs() - t) / 1_000_000 });
 
     t = osm.nowNs();
-    var idx = try index.build(a, &R, leaf_max);
+    var idx = try ivf.build(a, &R, n_clusters, iters);
     defer idx.deinit();
-    std.debug.print("[indexer] built kd-tree: nodes={d} blocks={d} leaf_max={d} in {d} ms\n", .{ idx.n_nodes, idx.n_blocks, leaf_max, (osm.nowNs() - t) / 1_000_000 });
+    std.debug.print("[indexer] IVF: clusters={d} iters={d} blocks={d} in {d} ms\n", .{ n_clusters, iters, idx.n_blocks, (osm.nowNs() - t) / 1_000_000 });
 
-    try index.saveIndex(&idx, out_path);
+    try ivf.save(&idx, out_path);
     std.debug.print("[indexer] wrote {s}\n", .{out_path});
 }

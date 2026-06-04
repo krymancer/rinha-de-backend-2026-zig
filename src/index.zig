@@ -278,12 +278,12 @@ pub fn build(alloc: std.mem.Allocator, refs: *const Refs, leaf_max: usize) !Inde
 
 // ---- search ------------------------------------------------------------------
 
-const Top5 = struct {
+pub const Top5 = struct {
     keys: [K]u64 = .{std.math.maxInt(u64)} ** K,
     worst_i: usize = 0,
     worst: u64 = std.math.maxInt(u64),
 
-    inline fn offer(self: *Top5, key: u64) void {
+    pub inline fn offer(self: *Top5, key: u64) void {
         if (key < self.worst) {
             self.keys[self.worst_i] = key;
             self.worst = self.keys[0];
@@ -296,7 +296,7 @@ const Top5 = struct {
             }
         }
     }
-    inline fn worstDist(self: *const Top5) i64 {
+    pub inline fn worstDist(self: *const Top5) i64 {
         return @intCast(self.worst >> DIST_SHIFT);
     }
 };
@@ -391,7 +391,7 @@ pub fn searchBBF(idx: *const Index, q: *const [VPAD]i16, budget: usize, heap: []
     return .{ .fraud_count = fraud, .approved = fraud < 3 };
 }
 
-inline fn blockDist(block: [*]const i16, q: *const [VPAD]i16) @Vector(LANES, i32) {
+pub inline fn blockDist(block: [*]const i16, q: *const [VPAD]i16) @Vector(LANES, i32) {
     var acc: @Vector(LANES, i32) = @splat(0);
     inline for (0..VPAD) |d| {
         const r: @Vector(LANES, i16) = block[d * LANES ..][0..LANES].*;

@@ -22,9 +22,10 @@ COPY build.zig ./
 COPY src ./src
 RUN zig build
 
-# Bake the index from the references.
-ARG LEAF_MAX=64
-RUN ./zig-out/bin/indexer refs.json /build/index.bin ${LEAF_MAX} && rm -f refs.json
+# Bake the IVF index from the references.
+ARG N_CLUSTERS=2048
+ARG KMEANS_ITERS=12
+RUN ./zig-out/bin/indexer refs.json /build/index.bin ${N_CLUSTERS} ${KMEANS_ITERS} && rm -f refs.json
 
 FROM scratch
 COPY --from=builder /build/zig-out/bin/lb /lb
