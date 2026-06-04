@@ -334,15 +334,25 @@ inline fn scanLeaf(idx: *const Index, node: Node, q: *const [VPAD]i16, top: *Top
     }
 }
 
+/// Latency guard: the true 5-NN almost always stabilise within the first few
+/// hundred leaves (the query's own leaf + a little backtracking); the remaining
+/// backtracking only *proves* exactness. For in-distribution queries the cap is
+/// never reached (search stays exact, E=0). For out-of-distribution queries
+/// (e.g. dates far outside the reference cloud) it bounds the worst-case work,
+/// trading a vanishingly rare neighbour swap for a bounded p99.
+pub const DEFAULT_CAP: usize = 8192;
+
 const SearchCtx = struct {
     idx: *const Index,
     q: *const [VPAD]i16,
+    cap: usize,
     top: Top5 = .{},
     off: [VPAD]i64 = .{0} ** VPAD,
     nleaf: usize = 0,
 
     fn visit(self: *SearchCtx, ni: u32, rd: i64) void {
         if (rd >= self.top.worstDist()) return;
+        if (self.nleaf >= self.cap) return;
         const node = self.idx.nodes[ni];
         if (node.dim == LEAF) {
             scanLeaf(self.idx, node, self.q, &self.top);
@@ -375,11 +385,11 @@ const SearchCtx = struct {
 };
 
 pub inline fn search(idx: *const Index, q: *const [VPAD]i16) Result {
-    return searchCore(idx, q, null);
+    return searchCore(idx, q, null, DEFAULT_CAP);
 }
 
-pub fn searchCore(idx: *const Index, q: *const [VPAD]i16, leaves: ?*usize) Result {
-    var ctx = SearchCtx{ .idx = idx, .q = q };
+pub fn searchCore(idx: *const Index, q: *const [VPAD]i16, leaves: ?*usize, cap: usize) Result {
+    var ctx = SearchCtx{ .idx = idx, .q = q, .cap = cap };
     ctx.visit(idx.root, 0);
     if (leaves) |p| p.* = ctx.nleaf;
     var fraud: u8 = 0;

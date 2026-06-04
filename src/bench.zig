@@ -40,6 +40,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     const val_path = it.next() orelse return;
     const leaf_max: usize = if (it.next()) |l| (std.fmt.parseInt(usize, l, 10) catch 1024) else 1024;
+    const cap: usize = if (it.next()) |l| (std.fmt.parseInt(usize, l, 10) catch 1_000_000) else 1_000_000;
 
     const a = std.heap.page_allocator;
 
@@ -93,7 +94,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             continue;
         };
         var nprobe: usize = 0;
-        const res = index.searchCore(&idx, &qv, &nprobe);
+        const res = index.searchCore(&idx, &qv, &nprobe, cap);
         const dt = osm.nowNs() - t0;
         try lat.append(a, dt);
         try probes_all.append(a, nprobe);
