@@ -13,17 +13,18 @@ RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${Z
     && ln -s "/opt/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
 
 WORKDIR /build
+# Fetch official references first (fixed for the edition) so source edits don't
+# re-trigger the 48MB download.
+ARG REFS_URL=https://raw.githubusercontent.com/zanfranceschi/rinha-de-backend-2026/main/resources/references.json.gz
+RUN curl -fsSL "${REFS_URL}" -o refs.json.gz && gunzip refs.json.gz
+
 COPY build.zig ./
 COPY src ./src
 RUN zig build
 
-# Fetch official references (fixed for the edition) and bake the index.
-ARG REFS_URL=https://raw.githubusercontent.com/zanfranceschi/rinha-de-backend-2026/main/resources/references.json.gz
+# Bake the index from the references.
 ARG LEAF_MAX=64
-RUN curl -fsSL "${REFS_URL}" -o refs.json.gz \
-    && gunzip refs.json.gz \
-    && ./zig-out/bin/indexer refs.json /build/index.bin ${LEAF_MAX} \
-    && rm -f refs.json
+RUN ./zig-out/bin/indexer refs.json /build/index.bin ${LEAF_MAX} && rm -f refs.json
 
 FROM scratch
 COPY --from=builder /build/zig-out/bin/lb /lb

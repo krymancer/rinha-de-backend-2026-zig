@@ -46,11 +46,11 @@ pub const Index = struct {
     meta: []u32, // block-ordered: (orig_idx<<1)|label; pad lanes = 0xFFFFFFFF
     n_blocks: usize = 0,
     alloc: ?std.mem.Allocator = null,
-    mmap: ?[]align(std.heap.page_size_min) u8 = null,
+    owned: ?[]u8 = null, // anonymous buffer holding the whole index (resident, not file-backed)
 
     pub fn deinit(self: *Index) void {
-        if (self.mmap) |m| {
-            _ = @import("os.zig").linux.munmap(@ptrCast(m.ptr), m.len);
+        if (self.owned) |b| {
+            if (self.alloc) |a| a.free(b);
         } else if (self.alloc) |a| {
             a.free(self.nodes);
             a.free(self.blocks);
@@ -114,25 +114,30 @@ pub fn saveIndex(idx: *const Index, path: [*:0]const u8) !void {
     try os.writeAll(fd, std.mem.sliceAsBytes(idx.meta));
 }
 
-pub fn mapIndex(path: [*:0]const u8, pin: bool) !Index {
+/// Load the index into ANONYMOUS memory (explicit read), not a file-backed mmap.
+/// Anonymous pages cannot be reclaimed to disk, so the working set stays resident
+/// under cgroup/host memory pressure — avoiding the multi-hundred-ms refault stalls
+/// that file-backed mmap suffers on the RAM-contended 8GB test box. mlockall (best
+/// effort, needs memlock rlimit) additionally pins against swap.
+pub fn mapIndex(alloc: std.mem.Allocator, path: [*:0]const u8, pin: bool) !Index {
     const os = @import("os.zig");
-    const fd = try os.openRead(path);
-    defer os.close(fd);
-    const size = try os.fileSize(fd);
-    const base = try os.mapFileRead(fd, size);
-    if (pin) os.pinMemory(base);
-    const h: *const Header = @ptrCast(@alignCast(base.ptr));
+    const buf = try os.readFileAlloc(alloc, path); // page-aligned, fully resident
+    errdefer alloc.free(buf);
+    if (buf.len < @sizeOf(Header)) return error.Truncated;
+    const h: *const Header = @ptrCast(@alignCast(buf.ptr));
     if (!std.mem.eql(u8, &h.magic, MAGIC)) return error.BadMagic;
+    if (pin) _ = os.linux.mlockall(.{ .CURRENT = true, .FUTURE = true });
     return .{
         .n = h.n,
         .n_nodes = h.n_nodes,
         .root = @intCast(h.root),
         .leaf_max = h.leaf_max,
         .n_blocks = h.n_blocks,
-        .nodes = @as([*]Node, @ptrCast(@alignCast(base.ptr + h.nodes_off)))[0..h.n_nodes],
-        .blocks = @as([*]align(32) i16, @ptrCast(@alignCast(base.ptr + h.blocks_off)))[0 .. h.n_blocks * BLOCK_I16],
-        .meta = @as([*]u32, @ptrCast(@alignCast(base.ptr + h.meta_off)))[0 .. h.n_blocks * LANES],
-        .mmap = base,
+        .nodes = @as([*]Node, @ptrCast(@alignCast(buf.ptr + h.nodes_off)))[0..h.n_nodes],
+        .blocks = @as([*]align(32) i16, @ptrCast(@alignCast(buf.ptr + h.blocks_off)))[0 .. h.n_blocks * BLOCK_I16],
+        .meta = @as([*]u32, @ptrCast(@alignCast(buf.ptr + h.meta_off)))[0 .. h.n_blocks * LANES],
+        .alloc = alloc,
+        .owned = buf,
     };
 }
 
@@ -429,7 +434,7 @@ test "kd-tree search matches oracle on small synthetic set" {
 
     // serialize -> mmap roundtrip must give identical results
     try saveIndex(&idx, "/tmp/rnhz_test_index.bin");
-    var midx = try mapIndex("/tmp/rnhz_test_index.bin", false);
+    var midx = try mapIndex(a, "/tmp/rnhz_test_index.bin", false);
     defer midx.deinit();
     prng = std.Random.DefaultPrng.init(777);
     const rnd2 = prng.random();

@@ -195,7 +195,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const ctrl_path = it.next() orelse return error.Args;
     const index_path = it.next() orelse return error.Args;
 
-    gidx = try index.mapIndex(index_path, true);
+    gidx = try index.mapIndex(std.heap.page_allocator, index_path, true);
 
     // Unix SEQPACKET listener for the LB to connect and pass client fds.
     const lfd: i32 = @intCast(try os.ok(linux.socket(AF.UNIX, SOCK.SEQPACKET | SOCK.NONBLOCK | SOCK.CLOEXEC, 0)));
