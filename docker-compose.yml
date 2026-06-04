@@ -1,0 +1,50 @@
+services:
+  api1:
+    image: ghcr.io/krymancer/rinha-de-backend-2026-zig:latest
+    command: ["/api", "/sockets/api1.sock", "/index.bin"]
+    network_mode: none
+    volumes:
+      - sockets:/sockets
+    ulimits:
+      memlock: -1
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "160MB"
+
+  api2:
+    image: ghcr.io/krymancer/rinha-de-backend-2026-zig:latest
+    command: ["/api", "/sockets/api2.sock", "/index.bin"]
+    network_mode: none
+    volumes:
+      - sockets:/sockets
+    ulimits:
+      memlock: -1
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "160MB"
+
+  lb:
+    image: ghcr.io/krymancer/rinha-de-backend-2026-zig:latest
+    command: ["/lb", "9999", "/sockets/api1.sock", "/sockets/api2.sock"]
+    depends_on:
+      - api1
+      - api2
+    ports:
+      - "9999:9999"
+    volumes:
+      - sockets:/sockets
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: "30MB"
+
+volumes:
+  sockets:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs

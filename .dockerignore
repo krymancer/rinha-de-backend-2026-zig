@@ -1,0 +1,10 @@
+_official/
+_research/
+data/
+zig-out/
+.zig-cache/
+zig-cache/
+.git/
+*.bin
+*.gz
+*.md

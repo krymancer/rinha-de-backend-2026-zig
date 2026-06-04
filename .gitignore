@@ -1,0 +1,16 @@
+# build artifacts
+zig-cache/
+zig-out/
+.zig-cache/
+
+# research / scratch (not part of the repo)
+_official/
+_research/
+
+# large generated/downloaded data — never committed; baked into the image at build time
+data/
+*.bin
+*.gz
+references.json
+test-data.json
+results.json

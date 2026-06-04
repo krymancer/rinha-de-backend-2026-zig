@@ -1,0 +1,7 @@
+{
+    "participants": ["Junior Nascimento"],
+    "social": ["https://github.com/krymancer"],
+    "source-code-repo": "https://github.com/krymancer/rinha-de-backend-2026-zig",
+    "stack": ["zig", "epoll", "scm_rights", "kd-tree", "avx2"],
+    "open_to_work": false
+}
