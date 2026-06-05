@@ -1,4 +1,6 @@
-//! Times vectorize+search per request over a payload file (test-data.json).
+//! Times vectorize+search per request over a payload file (test-data.json) AND
+//! validates the APPROVED decision (the only thing the grader checks) against the
+//! ground-truth expected_approved, at a given probe budget, vs a full exact scan.
 //!   measure <index.bin> <test-data.json>  [init_probe] [max_probe]
 
 const std = @import("std");
@@ -43,8 +45,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const keys = try a.alloc(u64, index.n_clusters);
     defer a.free(keys);
 
-    var vlat: std.ArrayList(u64) = .empty;
-    defer vlat.deinit(a);
     var slat: std.ArrayList(u64) = .empty;
     defer slat.deinit(a);
     var tlat: std.ArrayList(u64) = .empty;
@@ -52,9 +52,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var probes: std.ArrayList(u64) = .empty;
     defer probes.deinit(a);
 
+    var total: usize = 0;
+    // approx (ip,mp) vs ground truth
+    var fp: usize = 0; // legit denied  (expected approve, we reject)
+    var fn_: usize = 0; // fraud approved (expected reject, we approve)
+    // exact full-scan vs ground truth (sanity)
+    var efp: usize = 0;
+    var efn: usize = 0;
+    // approx vs exact (does the probe budget ever flip the approved bit?)
+    var flips: usize = 0;
+    var fc_mism: usize = 0; // fraud_count divergence (informational)
+
     var pos: usize = 0;
-    var sink: u64 = 0;
-    var mism: usize = 0;
     while (true) {
         const rs = std.mem.indexOfPos(u8, vbuf, pos, "\"request\":") orelse break;
         var p = rs + "\"request\":".len;
@@ -62,33 +71,46 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (p >= vbuf.len or vbuf[p] != '{') break;
         const req_end = braceEnd(vbuf, p);
         const req = vbuf[p..req_end];
-        pos = req_end;
+        const ea = std.mem.indexOfPos(u8, vbuf, req_end, "\"expected_approved\":") orelse break;
+        const expected = vbuf[ea + "\"expected_approved\":".len] == 't';
+        pos = ea + "\"expected_approved\":".len;
+        total += 1;
 
         const t0 = osm.nowNs();
-        const qv = vec.vectorize(req) orelse continue;
+        const qv = vec.vectorize(req) orelse {
+            if (expected) fp += 1; // we'd return SAFE=approved; if expected reject this is fn, else ok -> approx: SAFE means approved=true
+            continue;
+        };
         const t1 = osm.nowNs();
         var np: usize = 0;
         const res = ivf.search(&index, &qv, ip, mp, keys, &np);
         const t2 = osm.nowNs();
-        // Exact reference: probe every cluster (no confident early-stop, no budget
-        // cap) so the 5-NN are the true brute-force nearest. Any divergence in
-        // fraud_count is an approximation error that would raise the grader's E.
         const exact = ivf.search(&index, &qv, index.n_clusters, index.n_clusters, keys, null);
-        if (exact.fraud_count != res.fraud_count) mism += 1;
-        sink = sink *% 1000003 +% res.fraud_count; // order-sensitive checksum
-        try vlat.append(a, t1 - t0);
+
+        if (res.approved != expected) {
+            if (res.approved) fn_ += 1 else fp += 1;
+        }
+        if (exact.approved != expected) {
+            if (exact.approved) efn += 1 else efp += 1;
+        }
+        if (res.approved != exact.approved) flips += 1;
+        if (res.fraud_count != exact.fraud_count) fc_mism += 1;
+
         try slat.append(a, t2 - t1);
         try tlat.append(a, t2 - t0);
         try probes.append(a, np);
     }
-    std.mem.sort(u64, vlat.items, {}, std.sort.asc(u64));
     std.mem.sort(u64, slat.items, {}, std.sort.asc(u64));
     std.mem.sort(u64, tlat.items, {}, std.sort.asc(u64));
     std.mem.sort(u64, probes.items, {}, std.sort.asc(u64));
     const n = tlat.items.len;
-    std.debug.print("requests={d} ip={d} mp={d} (checksum={d}) approx-vs-exact mismatches={d} -> {s}\n", .{ n, ip, mp, sink, mism, if (mism == 0) "E=0 (exact)" else "APPROX ERROR" });
-    std.debug.print("vectorize ns: p50={d} p99={d} max={d}\n", .{ pct(vlat.items, 0.5), pct(vlat.items, 0.99), vlat.items[n - 1] });
-    std.debug.print("search    ns: p50={d} p99={d} max={d}\n", .{ pct(slat.items, 0.5), pct(slat.items, 0.99), slat.items[n - 1] });
-    std.debug.print("TOTAL     ns: p50={d} p99={d} max={d}\n", .{ pct(tlat.items, 0.5), pct(tlat.items, 0.99), tlat.items[n - 1] });
-    std.debug.print("probes      : p50={d} p99={d} max={d}\n", .{ pct(probes.items, 0.5), pct(probes.items, 0.99), probes.items[n - 1] });
+    const E_approx = fp * 1 + fn_ * 3;
+    const E_exact = efp * 1 + efn * 3;
+    std.debug.print("ip={d:>3} mp={d:>3} | search p50={d}ns p99={d}ns max={d}ns | probes p50={d} p99={d} max={d} | approx: fp={d} fn={d} E={d} {s} | exact: fp={d} fn={d} E={d} | flips(approx!=exact)={d} fc_mism={d}\n", .{
+        ip, mp,
+        pct(slat.items, 0.5), pct(slat.items, 0.99), slat.items[n - 1],
+        pct(probes.items, 0.5), pct(probes.items, 0.99), probes.items[n - 1],
+        fp, fn_, E_approx, if (E_approx == 0) "E=0" else "FAIL",
+        efp, efn, E_exact, flips, fc_mism,
+    });
 }

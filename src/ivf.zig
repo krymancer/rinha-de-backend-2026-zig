@@ -14,10 +14,53 @@ const os = @import("os.zig");
 
 pub const K = idxmod.K; // 5 neighbours
 pub const LANES = idxmod.LANES;
-pub const BLOCK_I16 = idxmod.BLOCK_I16;
 pub const DIST_SHIFT = idxmod.DIST_SHIFT;
 const Top5 = idxmod.Top5;
-const blockDist = idxmod.blockDist;
+
+// Pair-SoA block layout for the vpmaddwd distance kernel (jhon2c's trick): each
+// block holds LANES (8) vectors over the 14 real dims, packed as 7 pairs. Pair p
+// stores dims (2p, 2p+1) of the 8 vectors interleaved:
+//   [v0_2p, v0_2p+1, v1_2p, v1_2p+1, ... v7_2p, v7_2p+1]   (16 i16 = one 256-bit reg)
+// vpmaddwd(diff, diff) then yields, per vector j, (d_2p)^2 + (d_2p+1)^2 in one
+// instruction (fused i16*i16 + horizontal pair-add) at ~1/2 the ops of the SoA-8
+// widen+vmulld path, dropping the 2 zero pad dims entirely.
+pub const PAIRS = 7; // 14 real dims / 2
+pub const PBLOCK = PAIRS * 16; // 112 i16 per block
+
+const QPairs = [PAIRS]@Vector(16, i16);
+
+inline fn packQ(q: *const [VPAD]i16) QPairs {
+    var qp: QPairs = undefined;
+    inline for (0..PAIRS) |p| {
+        var v: [16]i16 = undefined;
+        const a = q[2 * p];
+        const b = q[2 * p + 1];
+        inline for (0..LANES) |lane| {
+            v[lane * 2] = a;
+            v[lane * 2 + 1] = b;
+        }
+        qp[p] = v;
+    }
+    return qp;
+}
+
+inline fn pmaddwd(d: @Vector(16, i16)) @Vector(8, i32) {
+    return asm ("vpmaddwd %[d], %[d], %[o]"
+        : [o] "=x" (-> @Vector(8, i32)),
+        : [d] "x" (d),
+    );
+}
+
+// Squared distance of 8 vectors (one block) to the query. Bit-identical to the
+// SoA-8 blockDist over the 14 real dims; result lane j = vector j's distance.
+inline fn dist8(block: [*]const i16, qp: *const QPairs) @Vector(8, i32) {
+    var acc: @Vector(8, i32) = @splat(0);
+    inline for (0..PAIRS) |p| {
+        const bp: @Vector(16, i16) = block[p * 16 ..][0..16].*;
+        acc += pmaddwd(bp -% qp[p]);
+    }
+    return acc;
+}
 
 pub const Result = idxmod.Result;
 
@@ -155,7 +198,7 @@ pub fn build(alloc: std.mem.Allocator, refs: *const Refs, n_clusters: usize, ite
     var ivf = Ivf{
         .n = n,
         .n_clusters = n_clusters,
-        .blocks = try alloc.alignedAlloc(i16, .@"32", total_blocks * BLOCK_I16),
+        .blocks = try alloc.alignedAlloc(i16, .@"32", total_blocks * PBLOCK),
         .meta = try alloc.alloc(u32, total_blocks * LANES),
         .cl_blk = try alloc.alloc(u32, n_clusters),
         .cl_cnt = try alloc.alloc(u32, n_clusters),
@@ -191,10 +234,15 @@ pub fn build(alloc: std.mem.Allocator, refs: *const Refs, n_clusters: usize, ite
         const b = ivf.cl_blk[c] + j / LANES;
         const lane = j % LANES;
         const v = refs.vec(i);
+        // bbox over all VPAD dims (clusterLB is 16-wide; pad dims are 0).
         inline for (0..VPAD) |d| {
-            ivf.blocks[b * BLOCK_I16 + d * LANES + lane] = v[d];
             if (v[d] < ivf.bbox_min[c * VPAD + d]) ivf.bbox_min[c * VPAD + d] = v[d];
             if (v[d] > ivf.bbox_max[c * VPAD + d]) ivf.bbox_max[c * VPAD + d] = v[d];
+        }
+        // block: pair-SoA over the 14 real dims (dims 14,15 are pad -> dropped).
+        inline for (0..PAIRS) |p| {
+            ivf.blocks[b * PBLOCK + p * 16 + lane * 2 + 0] = v[2 * p];
+            ivf.blocks[b * PBLOCK + p * 16 + lane * 2 + 1] = v[2 * p + 1];
         }
         ivf.meta[b * LANES + lane] = (@as(u32, @intCast(i)) << 1) | refs.labels[i];
     }
@@ -203,7 +251,7 @@ pub fn build(alloc: std.mem.Allocator, refs: *const Refs, n_clusters: usize, ite
 
 // ---- serialization -----------------------------------------------------------
 
-const MAGIC = "RNHZIVF1";
+const MAGIC = "RNHZIVF2"; // v2: pair-SoA blocks (PBLOCK=112) for the vpmaddwd kernel
 
 pub const Header = extern struct {
     magic: [8]u8,
@@ -297,7 +345,7 @@ pub fn map(alloc: std.mem.Allocator, path: [*:0]const u8, pin: bool) !Ivf {
     return .{
         .n = h.n,
         .n_clusters = nc,
-        .blocks = @as([*]align(32) i16, @ptrCast(@alignCast(buf.ptr + h.blocks_off)))[0 .. h.n_blocks * BLOCK_I16],
+        .blocks = @as([*]align(32) i16, @ptrCast(@alignCast(buf.ptr + h.blocks_off)))[0 .. h.n_blocks * PBLOCK],
         .meta = @as([*]u32, @ptrCast(@alignCast(buf.ptr + h.meta_off)))[0 .. h.n_blocks * LANES],
         .cl_blk = @as([*]u32, @ptrCast(@alignCast(buf.ptr + h.cl_blk_off)))[0..nc],
         .cl_cnt = @as([*]u32, @ptrCast(@alignCast(buf.ptr + h.cl_cnt_off)))[0..nc],
@@ -326,14 +374,14 @@ inline fn clusterLB(q: *const [VPAD]i16, mn: []const i16, mx: []const i16) i64 {
     return @reduce(.Add, sq);
 }
 
-inline fn scanCluster(ivf: *const Ivf, c: usize, q: *const [VPAD]i16, top: *Top5) void {
+inline fn scanCluster(ivf: *const Ivf, c: usize, qp: *const QPairs, top: *Top5) void {
     const cnt = ivf.cl_cnt[c];
     const blk0 = ivf.cl_blk[c];
     const nfull = cnt / LANES;
     const rem = cnt % LANES;
     var b: u32 = 0;
     while (b < nfull) : (b += 1) {
-        const dv = blockDist(ivf.blocks.ptr + (blk0 + b) * BLOCK_I16, q);
+        const dv = dist8(ivf.blocks.ptr + (blk0 + b) * PBLOCK, qp);
         if (@as(i64, @reduce(.Min, dv)) >= top.worstDist()) continue;
         const dists: [LANES]i32 = dv;
         const mbase = (blk0 + b) * LANES;
@@ -342,7 +390,7 @@ inline fn scanCluster(ivf: *const Ivf, c: usize, q: *const [VPAD]i16, top: *Top5
         }
     }
     if (rem != 0) {
-        const dists: [LANES]i32 = blockDist(ivf.blocks.ptr + (blk0 + nfull) * BLOCK_I16, q);
+        const dists: [LANES]i32 = dist8(ivf.blocks.ptr + (blk0 + nfull) * PBLOCK, qp);
         const mbase = (blk0 + nfull) * LANES;
         var lane: usize = 0;
         while (lane < rem) : (lane += 1) {
@@ -394,6 +442,7 @@ pub fn search(ivf: *const Ivf, q: *const [VPAD]i16, initial_probe: usize, max_pr
         }
     }
 
+    const qp = packQ(q); // pack query into 7 pair-vectors once per search
     var top = Top5{};
     var probed: usize = 0;
     const mask: u64 = (1 << CL_BITS) - 1;
@@ -404,7 +453,7 @@ pub fn search(ivf: *const Ivf, q: *const [VPAD]i16, initial_probe: usize, max_pr
         hn -= 1; // pop min
         keys[0] = keys[hn];
         siftDown(keys[0..nc], hn, 0);
-        scanCluster(ivf, @intCast(kmin & mask), q, &top);
+        scanCluster(ivf, @intCast(kmin & mask), &qp, &top);
         probed += 1;
         if (probed >= initial_probe) {
             var fr: u8 = 0;

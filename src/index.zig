@@ -23,6 +23,7 @@ pub const K = 5;
 pub const DIST_SHIFT = 23; // 1 label bit + 22 index bits below the distance
 pub const LANES = 8;
 pub const BLOCK_I16 = VPAD * LANES; // 128 i16 per block
+pub const REAL_DIMS = 14; // dims 14,15 are always-zero pad -> skip them in the hot scan
 pub const LEAF = 0xFF; // node.dim sentinel for a leaf
 
 /// dist max = 2*(20000^2) + 12*(10000^2) = 2.0e9 < 2^31, so i32 accumulation is safe.
@@ -393,7 +394,7 @@ pub fn searchBBF(idx: *const Index, q: *const [VPAD]i16, budget: usize, heap: []
 
 pub inline fn blockDist(block: [*]const i16, q: *const [VPAD]i16) @Vector(LANES, i32) {
     var acc: @Vector(LANES, i32) = @splat(0);
-    inline for (0..VPAD) |d| {
+    inline for (0..REAL_DIMS) |d| {
         const r: @Vector(LANES, i16) = block[d * LANES ..][0..LANES].*;
         const ri: @Vector(LANES, i32) = @intCast(r);
         const qi: @Vector(LANES, i32) = @splat(@as(i32, q[d]));
