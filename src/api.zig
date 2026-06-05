@@ -30,8 +30,8 @@ const Conn = struct {
 // IVF probe budget: probe INIT_PROBE clusters, then stop as soon as the decision
 // is confident (0 or 5 frauds) or exact; expand up to MAX_PROBE only for the
 // ambiguous out-of-distribution queries — keeping the common case sub-0.1ms.
-const INIT_PROBE: usize = 24;
-const MAX_PROBE: usize = 96;
+const INIT_PROBE: usize = 16;
+const MAX_PROBE: usize = 64;
 const MAX_CLUSTERS: usize = 8192; // upper bound for the per-query LB-key scratch
 
 var conns: [MAX_FDS]Conn = undefined;
